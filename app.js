@@ -51,15 +51,52 @@
     { name: "Avocado", cal: 240, unit: "piece", countable: true },
   ].sort((a, b) => a.name.localeCompare(b.name));
 
+  const mealTemplates = {
+    withMeat: [
+      { name: "Ground meat with potatoes", cal: 620, meat: true },
+      { name: "Chicken with rice", cal: 520, meat: true },
+      { name: "Beef stew", cal: 480, meat: true },
+      { name: "Steak with sides", cal: 700, meat: true },
+      { name: "Meat pasta", cal: 610, meat: true },
+      { name: "Burger meal", cal: 720, meat: true },
+      { name: "Grilled chicken plate", cal: 450, meat: true },
+      { name: "Fish with rice", cal: 480, meat: true },
+    ],
+    noMeat: [
+      { name: "Vegetable stir-fry", cal: 280, meat: false },
+      { name: "Potato vegetable skillet", cal: 360, meat: false },
+      { name: "Salad bowl", cal: 180, meat: false },
+      { name: "Pasta (no meat)", cal: 420, meat: false },
+      { name: "Rice and vegetables", cal: 380, meat: false },
+      { name: "Banana", cal: 105, meat: false, countable: true, unit: "piece" },
+      { name: "Apple", cal: 95, meat: false, countable: true, unit: "piece" },
+      { name: "Tofu bowl", cal: 390, meat: false },
+    ],
+  };
+
+  const portionMult = { Small: 0.65, Regular: 1, Large: 1.4, "Extra large": 1.8 };
+
   const state = load() || { workouts: [], meals: [] };
   let tab = "log";
   let quantity = 1;
+  let mealMode = "home"; // home | camera | barcode | search
+  let cameraStream = null;
+  let meatType = "mixed"; // with | no | mixed
+  let portion = "Regular";
+  let scanSuggestions = [];
 
   const $ = (sel) => document.querySelector(sel);
   const screen = $("#screen");
   const splash = $("#splash");
   const app = $("#app");
   const audio = $("#startupAudio");
+
+  function stopCamera() {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach((t) => t.stop());
+      cameraStream = null;
+    }
+  }
 
   function load() {
     try { return JSON.parse(localStorage.getItem(STORE_KEY)); }
@@ -297,9 +334,340 @@
   }
 
   function renderMeals() {
+    if (mealMode === "camera") return renderMealCamera();
+    if (mealMode === "barcode") return renderMealBarcode();
+    if (mealMode === "search") return renderMealSearch();
+
     screen.innerHTML = `
       <section class="card">
-        <h2>Search foods</h2>
+        <h2>Meals</h2>
+        <p class="meta">Estimate meal calories by barcode, photo, or search.</p>
+        <button class="action-btn" id="optBarcode">
+          <strong>Scan barcode</strong>
+          <span class="meta">Packaged food via Open Food Facts</span>
+        </button>
+        <button class="action-btn" id="optCamera">
+          <strong>Scan food photo</strong>
+          <span class="meta">Camera estimate from the meal</span>
+        </button>
+        <button class="action-btn" id="optSearch">
+          <strong>Search foods</strong>
+          <span class="meta">Type a meal or ingredient</span>
+        </button>
+      </section>
+      <section class="card">
+        <h2>Logged meals</h2>
+        <div id="mealList" class="list"></div>
+      </section>
+    `;
+    $("#optBarcode").onclick = () => { mealMode = "barcode"; render(); };
+    $("#optCamera").onclick = () => { mealMode = "camera"; scanSuggestions = []; render(); };
+    $("#optSearch").onclick = () => { mealMode = "search"; render(); };
+    paintMealList($("#mealList"));
+  }
+
+  function paintMealList(el) {
+    if (!el) return;
+    if (!state.meals.length) {
+      el.innerHTML = `<p class="meta">No meals yet</p>`;
+      return;
+    }
+    el.innerHTML = state.meals.map((m) => `
+      <div class="item">
+        <div>
+          <strong>${m.name}</strong>
+          <div class="meta">${m.calories} kcal · ${m.servingInfo}</div>
+        </div>
+        <button data-del="${m.id}">Delete</button>
+      </div>
+    `).join("");
+    el.querySelectorAll("[data-del]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.meals = state.meals.filter((m) => m.id !== btn.dataset.del);
+        save();
+        render();
+      });
+    });
+  }
+
+  function saveMealSuggestion(s) {
+    const unit = s.unit || "serving";
+    const base = s.cal;
+    const mult = s.countable ? 1 : (portionMult[portion] || 1);
+    const total = Math.max(1, Math.round(base * mult * quantity));
+    state.meals.unshift({
+      id: uid(),
+      name: s.name,
+      calories: total,
+      servingInfo: s.countable
+        ? `${quantity} ${unit}${quantity > 1 ? "s" : ""} · photo estimate`
+        : `${quantity} × ${portion} · ${s.meat ? "with meat" : "no meat"} · photo`,
+      createdAt: Date.now(),
+    });
+    save();
+    toast(`Saved ${s.name} · ${total} kcal`);
+    stopCamera();
+    mealMode = "home";
+    quantity = 1;
+    render();
+  }
+
+  function buildScanSuggestions() {
+    let list = [];
+    if (meatType === "with") list = mealTemplates.withMeat;
+    else if (meatType === "no") list = mealTemplates.noMeat;
+    else list = [...mealTemplates.withMeat.slice(0, 4), ...mealTemplates.noMeat.slice(0, 4)];
+    scanSuggestions = list;
+  }
+
+  function renderMealCamera() {
+    buildScanSuggestions();
+    screen.innerHTML = `
+      <section class="card">
+        <div class="row-between">
+          <h2>Scan food</h2>
+          <button class="btn ghost" id="camBack">Back</button>
+        </div>
+        <div class="camera-box">
+          <video id="camVideo" autoplay playsinline muted></video>
+          <canvas id="camCanvas" class="hidden"></canvas>
+        </div>
+        <p class="meta" id="camStatus">Point at your meal, then tap Capture</p>
+        <button class="btn primary" id="captureBtn">Capture meal</button>
+        <div id="scanPanel" class="hidden">
+          <div class="meta" style="margin:0.5rem 0">How many?</div>
+          <div class="stepper">
+            <button class="btn ghost" id="qtyMinus">−</button>
+            <div style="text-align:center">
+              <div class="qty" id="qtyVal">${quantity}</div>
+              <div class="meta">pieces / servings</div>
+            </div>
+            <button class="btn ghost" id="qtyPlus">+</button>
+          </div>
+          <div class="meta" style="margin:0.75rem 0 0.4rem">Meat content</div>
+          <div class="chips">
+            <button class="chip ${meatType === "with" ? "active" : ""}" data-meat="with">With meat</button>
+            <button class="chip ${meatType === "no" ? "active" : ""}" data-meat="no">No meat</button>
+            <button class="chip ${meatType === "mixed" ? "active" : ""}" data-meat="mixed">Mixed</button>
+          </div>
+          <div class="meta" style="margin:0.75rem 0 0.4rem">Portion size</div>
+          <div class="chips" id="portionChips">
+            ${Object.keys(portionMult).map((p) =>
+              `<button class="chip ${portion === p ? "active" : ""}" data-portion="${p}">${p}</button>`
+            ).join("")}
+          </div>
+          <div id="scanResults" class="list" style="margin-top:0.75rem"></div>
+          <button class="btn ghost" id="retakeBtn" style="margin-top:0.5rem">Take another photo</button>
+        </div>
+      </section>
+    `;
+
+    const video = $("#camVideo");
+    const canvas = $("#camCanvas");
+    const status = $("#camStatus");
+    const scanPanel = $("#scanPanel");
+
+    $("#camBack").onclick = () => { stopCamera(); mealMode = "home"; render(); };
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    }).then((stream) => {
+      cameraStream = stream;
+      video.srcObject = stream;
+    }).catch(() => {
+      status.textContent = "Camera permission denied. Use Search foods instead.";
+      $("#captureBtn").disabled = true;
+    });
+
+    function paintScanResults() {
+      buildScanSuggestions();
+      $("#qtyVal").textContent = String(quantity);
+      const box = $("#scanResults");
+      box.innerHTML = scanSuggestions.map((s, i) => {
+        const mult = s.countable ? 1 : (portionMult[portion] || 1);
+        const total = Math.round(s.cal * mult * quantity);
+        return `
+          <div class="item">
+            <div>
+              <strong>${s.name}</strong>
+              <div class="meta">${total} kcal · ${s.meat ? "with meat" : "no meat"} · photo estimate</div>
+            </div>
+            <button data-idx="${i}">Save</button>
+          </div>
+        `;
+      }).join("");
+      box.querySelectorAll("[data-idx]").forEach((btn) => {
+        btn.onclick = () => saveMealSuggestion(scanSuggestions[Number(btn.dataset.idx)]);
+      });
+    }
+
+    $("#captureBtn").onclick = () => {
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+      status.textContent = "Photo captured — confirm meat/portion, then save.";
+      scanPanel.classList.remove("hidden");
+      $("#captureBtn").classList.add("hidden");
+      meatType = "mixed";
+      portion = "Regular";
+      quantity = 1;
+      paintScanResults();
+    };
+
+    $("#retakeBtn").onclick = () => {
+      scanPanel.classList.add("hidden");
+      $("#captureBtn").classList.remove("hidden");
+      status.textContent = "Point at your meal, then tap Capture";
+    };
+
+    screen.addEventListener("click", (e) => {
+      const meat = e.target.closest("[data-meat]");
+      if (meat) {
+        meatType = meat.dataset.meat;
+        document.querySelectorAll("[data-meat]").forEach((c) =>
+          c.classList.toggle("active", c.dataset.meat === meatType)
+        );
+        paintScanResults();
+      }
+      const por = e.target.closest("[data-portion]");
+      if (por) {
+        portion = por.dataset.portion;
+        document.querySelectorAll("[data-portion]").forEach((c) =>
+          c.classList.toggle("active", c.dataset.portion === portion)
+        );
+        paintScanResults();
+      }
+    });
+
+    $("#qtyMinus").onclick = () => { quantity = Math.max(1, quantity - 1); paintScanResults(); };
+    $("#qtyPlus").onclick = () => { quantity = Math.min(99, quantity + 1); paintScanResults(); };
+  }
+
+  function renderMealBarcode() {
+    screen.innerHTML = `
+      <section class="card">
+        <div class="row-between">
+          <h2>Scan barcode</h2>
+          <button class="btn ghost" id="barBack">Back</button>
+        </div>
+        <div class="camera-box">
+          <video id="barVideo" autoplay playsinline muted></video>
+        </div>
+        <p class="meta" id="barStatus">Point at a product barcode</p>
+        <label>Or type barcode
+          <input id="barcodeInput" placeholder="e.g. 3017620422003" inputmode="numeric" />
+        </label>
+        <button class="btn primary" id="lookupBtn">Look up</button>
+        <div id="barResult" class="list"></div>
+      </section>
+    `;
+
+    $("#barBack").onclick = () => { stopCamera(); mealMode = "home"; render(); };
+    const video = $("#barVideo");
+    const status = $("#barStatus");
+    let scanning = true;
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    }).then((stream) => {
+      cameraStream = stream;
+      video.srcObject = stream;
+      if ("BarcodeDetector" in window) {
+        const detector = new BarcodeDetector({
+          formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"],
+        });
+        const tick = async () => {
+          if (!scanning || !cameraStream) return;
+          try {
+            const codes = await detector.detect(video);
+            if (codes.length && codes[0].rawValue) {
+              scanning = false;
+              $("#barcodeInput").value = codes[0].rawValue;
+              status.textContent = `Found: ${codes[0].rawValue}`;
+              lookupBarcode(codes[0].rawValue);
+              return;
+            }
+          } catch (_) { /* ignore */ }
+          requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      } else {
+        status.textContent = "Live barcode scan not supported here — type the code below.";
+      }
+    }).catch(() => {
+      status.textContent = "Camera blocked. Type the barcode manually.";
+    });
+
+    async function lookupBarcode(code) {
+      status.textContent = "Looking up barcode…";
+      const box = $("#barResult");
+      box.innerHTML = "";
+      try {
+        const res = await fetch(`https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(code)}.json`);
+        const data = await res.json();
+        if (data.status !== 1 || !data.product) {
+          status.textContent = "No product found for this barcode";
+          scanning = true;
+          return;
+        }
+        const p = data.product;
+        const name = p.product_name || p.generic_name || "Unknown product";
+        const n = p.nutriments || {};
+        let cal = Math.round(n["energy-kcal_serving"] || n["energy-kcal_100g"] || n["energy-kcal"] || 0);
+        if (!cal) {
+          status.textContent = "Product found but no calorie data";
+          scanning = true;
+          return;
+        }
+        const serving = p.serving_size || "1 serving";
+        status.textContent = `Found: ${name}`;
+        box.innerHTML = `
+          <div class="item">
+            <div>
+              <strong>${name}</strong>
+              <div class="meta">${cal} kcal · ${serving}</div>
+            </div>
+            <button id="saveBar">Save</button>
+          </div>
+        `;
+        $("#saveBar").onclick = () => {
+          state.meals.unshift({
+            id: uid(),
+            name,
+            calories: cal,
+            servingInfo: `${serving} · barcode`,
+            createdAt: Date.now(),
+          });
+          save();
+          toast(`Saved ${name} · ${cal} kcal`);
+          stopCamera();
+          mealMode = "home";
+          render();
+        };
+      } catch (_) {
+        status.textContent = "Lookup failed. Check internet and try again.";
+        scanning = true;
+      }
+    }
+
+    $("#lookupBtn").onclick = () => {
+      const code = $("#barcodeInput").value.trim();
+      if (!code) return toast("Enter a barcode");
+      lookupBarcode(code);
+    };
+  }
+
+  function renderMealSearch() {
+    screen.innerHTML = `
+      <section class="card">
+        <div class="row-between">
+          <h2>Search foods</h2>
+          <button class="btn ghost" id="searchBack">Back</button>
+        </div>
         <label>Food
           <input id="foodQuery" placeholder="banana, chicken, pizza…" />
         </label>
@@ -316,22 +684,14 @@
         </div>
         <div id="foodResults" class="list"></div>
       </section>
-      <section class="card">
-        <h2>Logged meals</h2>
-        <div id="mealList" class="list"></div>
-      </section>
     `;
 
+    $("#searchBack").onclick = () => { mealMode = "home"; render(); };
     const results = $("#foodResults");
-    const mealList = $("#mealList");
     const queryInput = $("#foodQuery");
 
-    function paintQuantity() {
-      $("#qtyVal").textContent = String(quantity);
-      paintResults(queryInput.value);
-    }
-
     function paintResults(q) {
+      $("#qtyVal").textContent = String(quantity);
       const matches = searchFoods(q);
       if (!q.trim()) {
         results.innerHTML = `<p class="meta">Type a food name</p>`;
@@ -366,45 +726,17 @@
           });
           save();
           toast(`Saved ${btn.dataset.food} · ${cal} kcal`);
-          paintMeals();
+          mealMode = "home";
+          quantity = 1;
+          render();
         });
       });
     }
 
-    function paintMeals() {
-      if (!state.meals.length) {
-        mealList.innerHTML = `<p class="meta">No meals yet</p>`;
-        return;
-      }
-      mealList.innerHTML = state.meals.map((m) => `
-        <div class="item">
-          <div>
-            <strong>${m.name}</strong>
-            <div class="meta">${m.calories} kcal · ${m.servingInfo}</div>
-          </div>
-          <button data-del="${m.id}">Delete</button>
-        </div>
-      `).join("");
-      mealList.querySelectorAll("[data-del]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          state.meals = state.meals.filter((m) => m.id !== btn.dataset.del);
-          save();
-          paintMeals();
-        });
-      });
-    }
-
-    $("#qtyMinus").addEventListener("click", () => {
-      quantity = Math.max(1, quantity - 1);
-      paintQuantity();
-    });
-    $("#qtyPlus").addEventListener("click", () => {
-      quantity = Math.min(99, quantity + 1);
-      paintQuantity();
-    });
+    $("#qtyMinus").onclick = () => { quantity = Math.max(1, quantity - 1); paintResults(queryInput.value); };
+    $("#qtyPlus").onclick = () => { quantity = Math.min(99, quantity + 1); paintResults(queryInput.value); };
     queryInput.addEventListener("input", () => paintResults(queryInput.value));
     paintResults("");
-    paintMeals();
   }
 
   function renderHistory() {
@@ -475,6 +807,8 @@
 
   document.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      stopCamera();
+      if (btn.dataset.tab !== "meals") mealMode = "home";
       tab = btn.dataset.tab;
       render();
     });
