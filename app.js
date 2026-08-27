@@ -18,7 +18,7 @@
   ];
 
   const exercises = [
-    "Walking", "Running", "Bench Press", "Squat", "Deadlift", "Pull-ups",
+    "Walking", "Running", "Pilates", "Bench Press", "Squat", "Deadlift", "Pull-ups",
     "Shoulder Press", "Rows", "Lunges", "Push-ups", "Biceps Curl",
     "Triceps Extension", "Plank", "Burpees", "Cycling", "Jump Rope",
   ].sort((a, b) => a.localeCompare(b));
@@ -27,8 +27,14 @@
     "Bench Press": 5, Squat: 6, Deadlift: 6.5, "Pull-ups": 5.5,
     "Shoulder Press": 5, Rows: 5, Lunges: 5.5, "Push-ups": 4.5,
     "Biceps Curl": 3.5, "Triceps Extension": 3.5, Plank: 3, Burpees: 8,
-    Cycling: 6.5, "Jump Rope": 8.5,
+    Cycling: 6.5, "Jump Rope": 8.5, Pilates: 3.5,
   };
+
+  const pilatesTempos = [
+    { label: "Easy", met: 2.8, description: "Gentle / beginner mat" },
+    { label: "Moderate", met: 3.5, description: "Standard mat class" },
+    { label: "Advanced", met: 4.5, description: "Power / reformer" },
+  ];
 
   const foods = [
     { name: "Banana", cal: 105, unit: "piece", countable: true },
@@ -121,13 +127,14 @@
 
   function isCardio(name) {
     const n = (name || "").toLowerCase();
-    return n === "walking" || n === "running";
+    return n === "walking" || n === "running" || n === "pilates";
   }
 
   function temposFor(name) {
     const n = (name || "").toLowerCase();
     if (n === "walking") return walkingTempos;
     if (n === "running") return runningTempos;
+    if (n === "pilates") return pilatesTempos;
     return [];
   }
 
@@ -149,7 +156,7 @@
   function suggestExercises(q) {
     const query = (q || "").trim().toLowerCase();
     if (!query) return [];
-    const priority = ["Walking", "Running"].filter((e) => e.toLowerCase().startsWith(query));
+    const priority = ["Walking", "Running", "Pilates"].filter((e) => e.toLowerCase().startsWith(query));
     const rest = exercises.filter((e) => e.toLowerCase().includes(query));
     return [...new Set([...priority, ...rest])].slice(0, 8);
   }
@@ -174,12 +181,13 @@
     screen.innerHTML = `
       <section class="card">
         <h2>Add workout</h2>
-        <div class="row-2">
+        <div class="row-2" style="grid-template-columns: 1fr 1fr 1fr">
           <button type="button" class="chip" data-pick="Walking">Walking</button>
           <button type="button" class="chip" data-pick="Running">Running</button>
+          <button type="button" class="chip" data-pick="Pilates">Pilates</button>
         </div>
         <label>Exercise
-          <input id="exercise" placeholder="Walking, Running, Bench Press…" autocomplete="off" />
+          <input id="exercise" placeholder="Walking, Running, Pilates…" autocomplete="off" />
         </label>
         <div id="exSuggestions" class="suggestions hidden"></div>
         <div id="strengthFields" class="row">
