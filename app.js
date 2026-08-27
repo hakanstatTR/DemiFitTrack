@@ -341,16 +341,16 @@
     screen.innerHTML = `
       <section class="card">
         <h2>Meals</h2>
-        <p class="meta">Estimate meal calories by barcode, photo, or search.</p>
-        <button class="action-btn" id="optBarcode">
+        <p class="meta">Choose how to add a meal:</p>
+        <button type="button" class="action-btn" id="optCamera">
+          <strong>Scan food photo</strong>
+          <span class="meta">Take a photo and estimate calories</span>
+        </button>
+        <button type="button" class="action-btn" id="optBarcode">
           <strong>Scan barcode</strong>
           <span class="meta">Packaged food via Open Food Facts</span>
         </button>
-        <button class="action-btn" id="optCamera">
-          <strong>Scan food photo</strong>
-          <span class="meta">Camera estimate from the meal</span>
-        </button>
-        <button class="action-btn" id="optSearch">
+        <button type="button" class="action-btn" id="optSearch">
           <strong>Search foods</strong>
           <span class="meta">Type a meal or ingredient</span>
         </button>
@@ -360,10 +360,13 @@
         <div id="mealList" class="list"></div>
       </section>
     `;
-    $("#optBarcode").onclick = () => { mealMode = "barcode"; render(); };
-    $("#optCamera").onclick = () => { mealMode = "camera"; scanSuggestions = []; render(); };
-    $("#optSearch").onclick = () => { mealMode = "search"; render(); };
-    paintMealList($("#mealList"));
+    const cam = document.getElementById("optCamera");
+    const bar = document.getElementById("optBarcode");
+    const sea = document.getElementById("optSearch");
+    if (cam) cam.onclick = () => { mealMode = "camera"; scanSuggestions = []; render(); };
+    if (bar) bar.onclick = () => { mealMode = "barcode"; render(); };
+    if (sea) sea.onclick = () => { mealMode = "search"; render(); };
+    paintMealList(document.getElementById("mealList"));
   }
 
   function paintMealList(el) {
